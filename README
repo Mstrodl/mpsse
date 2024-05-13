@@ -1,0 +1,11 @@
+A lot of this code comes from folks who are a lot smarter than I am!
+
+The original SPI code comes from the talented Anatolij Gustschin:
+https://lkml.org/lkml/2018/11/27/1221
+
+Then, additional patches to add GPIO support were written by Ben Maddocks:
+https://github.com/bm16ton/ft2232-mpsse-i2c-spi-kern-drivers
+
+My code is based upon Ben Maddocks', with stuff we didn't need (like polled interrupts)
+removed for maintainability's sake and better support for our FT2232 chip (like accessing
+both MPSSEs!)
