@@ -1,7 +1,6 @@
 ifneq ($(KERNELRELEASE),)
 
-obj-m := mpsse.o
-obj-m += spi-ftdi-mpsse.o
+obj-m := gpio-mpsse.o
 
 else
 
