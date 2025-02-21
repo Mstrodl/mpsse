@@ -535,7 +535,8 @@ static int gpio_mpsse_probe(struct usb_interface *interface,
 		return err;
 
 	priv->gpio.label = devm_kasprintf(dev, GFP_KERNEL,
-					  "gpio-mpsse.%d.%d",
+					  "gpio-mpsse.%04x.%04x.%d.%d",
+					  id->idVendor, id->idProduct,
 					  priv->id, priv->intf_id);
 	if (!priv->gpio.label)
 		return -ENOMEM;
