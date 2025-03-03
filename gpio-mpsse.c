@@ -56,11 +56,11 @@ struct mpsse_quirk {
 
 static struct mpsse_quirk bryx_brik_quirk = {
 	.names = {
-		"Push to Talk",
+		[4] = "Push to Talk",
 		"Channel Activity",
 	},
-	.dir_out = ~BIT(0),	/* Push to Talk     */
-	.dir_in  = ~BIT(1), 	/* Channel Activity */
+	.dir_out = ~BIT(4),	/* Push to Talk     */
+	.dir_in  = ~BIT(5), 	/* Channel Activity */
 };
 
 static const struct usb_device_id gpio_mpsse_table[] = {
@@ -506,6 +506,7 @@ static int gpio_mpsse_probe(struct usb_interface *interface,
 {
 	struct mpsse_priv *priv;
 	struct device *dev;
+	char *serial;
 	int err;
 	struct mpsse_quirk *quirk = (void *)id->driver_info;
 
@@ -534,11 +535,15 @@ static int gpio_mpsse_probe(struct usb_interface *interface,
 	if (err)
 		return err;
 
+	serial = priv->udev->serial;
+	if (!serial)
+		serial = "NONE";
+
 	priv->gpio.label = devm_kasprintf(dev, GFP_KERNEL,
 					  "MPSSE%04x:%04x.%d.%d.%s",
 					  id->idVendor, id->idProduct,
 					  priv->intf_id, priv->id,
-					  priv->udev->serial || "NONE");
+					  serial);
 	if (!priv->gpio.label)
 		return -ENOMEM;
 
