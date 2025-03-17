@@ -56,8 +56,10 @@ struct mpsse_quirk {
 
 static struct mpsse_quirk bryx_brik_quirk = {
 	.names = {
-		[4] = "Push to Talk",
+		"NC", "NC", "NC", "NC",
+		"Push to Talk",
 		"Channel Activity",
+		"NC", "NC"
 	},
 	.dir_out = ~BIT(4),	/* Push to Talk     */
 	.dir_in  = ~BIT(5), 	/* Channel Activity */
