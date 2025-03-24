@@ -17,7 +17,7 @@ struct mpsse_priv {
 	struct usb_device *udev;     /* USB device encompassing all MPSSEs */
 	struct usb_interface *intf;  /* USB interface for this MPSSE */
 	u8 intf_id;                  /* USB interface number for this MPSSE */
-	struct work_struct irq_work; /* polling work thread */
+	struct list_head workers;    /* polling work threads */
 	struct mutex irq_mutex;	     /* lock over irq_data */
 	atomic_t irq_type[16];	     /* pin -> edge detection type */
 	atomic_t irq_enabled;
@@ -35,6 +35,13 @@ struct mpsse_priv {
 	struct usb_endpoint_descriptor *bulk_out;
 
 	struct mutex io_mutex;	    /* sync I/O with disconnect */
+};
+
+struct mpsse_worker {
+	struct mpsse_priv  *priv;
+	struct work_struct  work;
+	struct list_head    list;
+	struct rcu_head     rcu;
 };
 
 struct bulk_desc {
@@ -357,16 +364,38 @@ static int gpio_mpsse_get_direction(struct gpio_chip *chip,
 	return ret;
 }
 
-static void gpio_mpsse_poll(struct work_struct *work)
+static void gpio_mpsse_stop(struct rcu_head *rhp)
+{
+	struct mpsse_worker *worker = container_of(rhp, struct mpsse_worker, rcu);
+
+	flush_work(&worker->work);
+	devm_kfree(&worker->priv->udev->dev, worker);
+}
+
+static void gpio_mpsse_poll(struct work_struct *my_work)
 {
 	unsigned long pin_mask, pin_states, flags;
 	int irq_enabled, offset, err, value, fire_irq,
 		irq, old_value[16], irq_type[16];
-	struct mpsse_priv *priv = container_of(work, struct mpsse_priv,
-					       irq_work);
+	struct mpsse_worker *worker;
+	struct mpsse_worker *my_worker = container_of(my_work, struct mpsse_worker, work);
+	struct mpsse_priv *priv = my_worker->priv;
 
 	for (offset = 0; offset < priv->gpio.ngpio; ++offset)
 		old_value[offset] = -1;
+
+	scoped_guard(mutex, &priv->irq_mutex) {
+		rcu_read_lock();
+		list_for_each_entry_rcu (worker, &priv->workers, list) {
+			/* Don't stop ourselves */
+			if (worker == my_worker) {
+				continue;
+			}
+			list_del_rcu(&worker->list);
+			call_rcu(&worker->rcu, gpio_mpsse_stop);
+		}
+		rcu_read_unlock();
+	}
 
 	while ((irq_enabled = atomic_read(&priv->irq_enabled))) {
 		usleep_range(MPSSE_POLL_INTERVAL, MPSSE_POLL_INTERVAL + 1000);
@@ -443,21 +472,39 @@ static int gpio_mpsse_set_irq_type(struct irq_data *irqd, unsigned int type)
 
 static void gpio_mpsse_irq_disable(struct irq_data *irqd)
 {
+	struct mpsse_worker *worker;
 	struct mpsse_priv *priv = irq_data_get_irq_chip_data(irqd);
 
 	atomic_and(~BIT(irqd->hwirq), &priv->irq_enabled);
 	gpiochip_disable_irq(&priv->gpio, irqd->hwirq);
+
+	rcu_read_lock();
+	list_for_each_entry_rcu (worker, &priv->workers, list) {
+		list_del_rcu(&worker->list);
+		call_rcu(&worker->rcu, gpio_mpsse_stop);
+	}
+	rcu_read_unlock();
 }
 
 static void gpio_mpsse_irq_enable(struct irq_data *irqd)
 {
+	struct mpsse_worker *worker;
 	struct mpsse_priv *priv = irq_data_get_irq_chip_data(irqd);
 
 	gpiochip_enable_irq(&priv->gpio, irqd->hwirq);
 	/* If no-one else was using the IRQ, enable it */
 	if (!atomic_fetch_or(BIT(irqd->hwirq), &priv->irq_enabled)) {
-		INIT_WORK(&priv->irq_work, gpio_mpsse_poll);
-		schedule_work(&priv->irq_work);
+		worker = devm_kmalloc(&priv->udev->dev, sizeof(*worker), GFP_KERNEL);
+		if (!worker) {
+			dev_err(&priv->udev->dev,
+				"mpsse: Out of memory, can't set up IRQ\n");
+			return;
+		}
+		worker->priv = priv;
+		INIT_LIST_HEAD(&worker->list);
+		INIT_WORK(&worker->work, gpio_mpsse_poll);
+
+		list_add_rcu(&worker->list, &priv->workers);
 	}
 }
 
@@ -516,6 +563,8 @@ static int gpio_mpsse_probe(struct usb_interface *interface,
 	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
 	if (!priv)
 		return -ENOMEM;
+
+	INIT_LIST_HEAD(&priv->workers);
 
 	priv->udev = usb_get_dev(interface_to_usbdev(interface));
 	priv->intf = interface;
@@ -619,7 +668,19 @@ static int gpio_mpsse_probe(struct usb_interface *interface,
 
 static void gpio_mpsse_disconnect(struct usb_interface *intf)
 {
+	struct mpsse_worker *worker;
 	struct mpsse_priv *priv = usb_get_intfdata(intf);
+
+	scoped_guard(mutex, &priv->irq_mutex) {
+		rcu_read_lock();
+		list_for_each_entry_rcu (worker, &priv->workers, list) {
+			list_del_rcu(&worker->list);
+			call_rcu(&worker->rcu, gpio_mpsse_stop);
+		}
+		rcu_read_unlock();
+	}
+
+	rcu_barrier();
 
 	priv->intf = NULL;
 	usb_set_intfdata(intf, NULL);
