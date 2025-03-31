@@ -40,8 +40,8 @@ struct mpsse_priv {
 struct mpsse_worker {
 	struct mpsse_priv  *priv;
 	struct work_struct  work;
-	struct list_head    list;
-	struct rcu_head     rcu;
+	struct list_head    list;   /* linked list */
+	struct rcu_head     rcu;    /* synchronization */
 };
 
 struct bulk_desc {
@@ -530,7 +530,8 @@ static int mpsse_init_valid_mask(struct gpio_chip *chip,
 {
 	struct mpsse_priv *priv = gpiochip_get_data(chip);
 
-	BUG_ON(priv == NULL);
+	if (WARN_ON(priv == NULL))
+		return -ENODEV;
 
 	/* If bit is set in both, set to 0 (NAND) */
 	*valid_mask = ~priv->dir_in | ~priv->dir_out;
@@ -544,7 +545,8 @@ static void mpsse_irq_init_valid_mask(struct gpio_chip *chip,
 {
 	struct mpsse_priv *priv = gpiochip_get_data(chip);
 
-	BUG_ON(priv == NULL);
+	if (WARN_ON(priv == NULL))
+		return;
 
 	/* Can only use IRQ on input capable pins */
 	*valid_mask = ~priv->dir_in;
