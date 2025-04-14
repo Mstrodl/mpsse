@@ -40,7 +40,9 @@ struct mpsse_priv {
 struct mpsse_worker {
 	struct mpsse_priv  *priv;
 	struct work_struct  work;
+	atomic_t       cancelled;
 	struct list_head    list;   /* linked list */
+	struct list_head destroy;   /* teardown linked list */
 	struct rcu_head     rcu;    /* synchronization */
 };
 
@@ -364,11 +366,9 @@ static int gpio_mpsse_get_direction(struct gpio_chip *chip,
 	return ret;
 }
 
-static void gpio_mpsse_stop(struct rcu_head *rhp)
+static void gpio_mpsse_stop(struct mpsse_worker *worker)
 {
-	struct mpsse_worker *worker = container_of(rhp, struct mpsse_worker, rcu);
-
-	flush_work(&worker->work);
+	cancel_work_sync(&worker->work);
 	devm_kfree(&worker->priv->udev->dev, worker);
 }
 
@@ -380,6 +380,7 @@ static void gpio_mpsse_poll(struct work_struct *my_work)
 	struct mpsse_worker *worker;
 	struct mpsse_worker *my_worker = container_of(my_work, struct mpsse_worker, work);
 	struct mpsse_priv *priv = my_worker->priv;
+	struct list_head destructors = LIST_HEAD_INIT(destructors);
 
 	for (offset = 0; offset < priv->gpio.ngpio; ++offset)
 		old_value[offset] = -1;
@@ -388,74 +389,87 @@ static void gpio_mpsse_poll(struct work_struct *my_work)
 		rcu_read_lock();
 		list_for_each_entry_rcu (worker, &priv->workers, list) {
 			/* Don't stop ourselves */
-			if (worker == my_worker) {
+			if (worker == my_worker)
 				continue;
-			}
 			list_del_rcu(&worker->list);
-			call_rcu(&worker->rcu, gpio_mpsse_stop);
+			/* Give worker a chance to terminate itself */
+			atomic_set(&worker->cancelled, 1);
+			/* Keep track of stuff to cancel */
+			INIT_LIST_HEAD(&worker->destroy);
+			list_add(&worker->destroy, &destructors);
 		}
 		rcu_read_unlock();
+		/* Make sure list consumers are finished before we tear down */
+		synchronize_rcu();
+		list_for_each_entry (worker, &destructors, destroy)
+			gpio_mpsse_stop(worker);
 	}
 
-	while ((irq_enabled = atomic_read(&priv->irq_enabled))) {
+	while ((irq_enabled = atomic_read(&priv->irq_enabled)) &&
+	       !atomic_read(&my_worker->cancelled)) {
 		usleep_range(MPSSE_POLL_INTERVAL, MPSSE_POLL_INTERVAL + 1000);
+
 		/* Cleanup will trigger at the end of the loop */
-		guard(mutex)(&priv->irq_mutex);
-
-		pin_mask = 0;
-		pin_states = 0;
-		for (offset = 0; offset < priv->gpio.ngpio; ++offset) {
-			irq_type[offset] = atomic_read(&priv->irq_type[offset]);
-			if (irq_type[offset] != IRQ_TYPE_NONE &&
-			    irq_enabled & BIT(offset))
-				pin_mask |= BIT(offset);
-			else
-				old_value[offset] = -1;
-		}
-
-		err = gpio_mpsse_get_multiple(&priv->gpio, &pin_mask,
-					      &pin_states);
-		if (err) {
-			dev_err_ratelimited(&priv->intf->dev,
-					    "Error polling!\n");
-			continue;
-		}
-
-		/* Check each value */
-		for (offset = 0; offset < priv->gpio.ngpio; ++offset) {
-			if (old_value[offset] == -1)
-				continue;
-
-			fire_irq = 0;
-			value = pin_states & BIT(offset);
-
-			switch (irq_type[offset]) {
-			case IRQ_TYPE_EDGE_RISING:
-				fire_irq = value > old_value[offset];
-				break;
-			case IRQ_TYPE_EDGE_FALLING:
-				fire_irq = value < old_value[offset];
-				break;
-			case IRQ_TYPE_EDGE_BOTH:
-				fire_irq = value != old_value[offset];
-				break;
+		/* We can't just lock here, otherwise we'll deadlock with
+		   the worker teardown */
+		scoped_cond_guard(mutex_try, continue, &priv->irq_mutex) {
+			pin_mask = 0;
+			pin_states = 0;
+			for (offset = 0; offset < priv->gpio.ngpio; ++offset) {
+				irq_type[offset] =
+					atomic_read(&priv->irq_type[offset]);
+				if (irq_type[offset] != IRQ_TYPE_NONE &&
+				    irq_enabled & BIT(offset))
+					pin_mask |= BIT(offset);
+				else
+					old_value[offset] = -1;
 			}
-			if (!fire_irq)
+
+			err = gpio_mpsse_get_multiple(&priv->gpio, &pin_mask,
+						      &pin_states);
+			if (err) {
+				dev_err_ratelimited(&priv->intf->dev,
+						    "Error polling!\n");
 				continue;
+			}
 
-			irq = irq_find_mapping(priv->gpio.irq.domain,
-					       offset);
-			local_irq_save(flags);
-			generic_handle_irq(irq);
-			local_irq_disable();
-			local_irq_restore(flags);
+			/* Check each value */
+			for (offset = 0; offset < priv->gpio.ngpio; ++offset) {
+				if (old_value[offset] == -1)
+					continue;
+
+				fire_irq = 0;
+				value = pin_states & BIT(offset);
+
+				switch (irq_type[offset]) {
+				case IRQ_TYPE_EDGE_RISING:
+					fire_irq = value > old_value[offset];
+					break;
+				case IRQ_TYPE_EDGE_FALLING:
+					fire_irq = value < old_value[offset];
+					break;
+				case IRQ_TYPE_EDGE_BOTH:
+					fire_irq = value != old_value[offset];
+					break;
+				}
+				if (!fire_irq)
+					continue;
+
+				irq = irq_find_mapping(priv->gpio.irq.domain,
+						       offset);
+				local_irq_save(flags);
+				generic_handle_irq(irq);
+				local_irq_disable();
+				local_irq_restore(flags);
+			}
+
+			/* Sync back values so we can refer to them next tick */
+			for (offset = 0; offset < priv->gpio.ngpio; ++offset)
+				if (irq_type[offset] != IRQ_TYPE_NONE &&
+				    irq_enabled & BIT(offset))
+					old_value[offset] =
+						pin_states & BIT(offset);
 		}
-
-		/* Sync back values so we can refer to them next tick */
-		for (offset = 0; offset < priv->gpio.ngpio; ++offset)
-			if (irq_type[offset] != IRQ_TYPE_NONE &&
-			    irq_enabled & BIT(offset))
-				old_value[offset] = pin_states & BIT(offset);
 	}
 }
 
@@ -480,8 +494,8 @@ static void gpio_mpsse_irq_disable(struct irq_data *irqd)
 
 	rcu_read_lock();
 	list_for_each_entry_rcu (worker, &priv->workers, list) {
-		list_del_rcu(&worker->list);
-		call_rcu(&worker->rcu, gpio_mpsse_stop);
+		/* Can't actually do teardown in IRQ context (blocks...) */
+		atomic_set(&worker->cancelled, 1);
 	}
 	rcu_read_unlock();
 }
@@ -673,14 +687,23 @@ static void gpio_mpsse_disconnect(struct usb_interface *intf)
 {
 	struct mpsse_worker *worker;
 	struct mpsse_priv *priv = usb_get_intfdata(intf);
+	struct list_head destructors = LIST_HEAD_INIT(destructors);
 
 	scoped_guard(mutex, &priv->irq_mutex) {
 		rcu_read_lock();
 		list_for_each_entry_rcu (worker, &priv->workers, list) {
 			list_del_rcu(&worker->list);
-			call_rcu(&worker->rcu, gpio_mpsse_stop);
+			/* Give worker a chance to terminate itself */
+			atomic_set(&worker->cancelled, 1);
+			/* Keep track of stuff to cancel */
+			INIT_LIST_HEAD(&worker->destroy);
+			list_add(&worker->destroy, &destructors);
 		}
 		rcu_read_unlock();
+		/* Make sure list consumers are finished before we tear down */
+		synchronize_rcu();
+		list_for_each_entry (worker, &destructors, destroy)
+			gpio_mpsse_stop(worker);
 	}
 
 	rcu_barrier();
