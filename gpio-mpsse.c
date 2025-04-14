@@ -503,6 +503,7 @@ static void gpio_mpsse_irq_enable(struct irq_data *irqd)
 		worker->priv = priv;
 		INIT_LIST_HEAD(&worker->list);
 		INIT_WORK(&worker->work, gpio_mpsse_poll);
+		schedule_work(&worker->work);
 
 		list_add_rcu(&worker->list, &priv->workers);
 	}
