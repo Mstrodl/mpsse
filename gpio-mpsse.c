@@ -69,8 +69,8 @@ static struct mpsse_quirk bryx_brik_quirk = {
 		"Push to Talk", "NC", "Channel Activity",
 		"NC", "NC"
 	},
-	.dir_out = ~BIT(3),	/* Push to Talk     */
-	.dir_in  = ~BIT(5), 	/* Channel Activity */
+	.dir_out = ~BIT(3),     /* Push to Talk     */
+	.dir_in  = ~BIT(5),     /* Channel Activity */
 };
 
 static const struct usb_device_id gpio_mpsse_table[] = {
@@ -212,7 +212,7 @@ static int mpsse_ensure_supported(struct gpio_chip *chip,
 			"mpsse: GPIO %ld doesn't support %s\n",
 			find_first_bit(&unsupported, sizeof(unsupported) * 8),
 			type);
-		return -ENOTSUPP;
+		return -EOPNOTSUPP;
 	}
 
 	return 0;
@@ -386,7 +386,7 @@ static void gpio_mpsse_poll(struct work_struct *my_work)
 
 	scoped_guard(mutex, &priv->irq_mutex) {
 		rcu_read_lock();
-		list_for_each_entry_rcu (worker, &priv->workers, list) {
+		list_for_each_entry_rcu(worker, &priv->workers, list) {
 			/* Don't stop ourselves */
 			if (worker == my_worker)
 				continue;
@@ -400,7 +400,7 @@ static void gpio_mpsse_poll(struct work_struct *my_work)
 		rcu_read_unlock();
 		/* Make sure list consumers are finished before we tear down */
 		synchronize_rcu();
-		list_for_each_entry (worker, &destructors, destroy)
+		list_for_each_entry(worker, &destructors, destroy)
 			gpio_mpsse_stop(worker);
 	}
 
@@ -409,8 +409,7 @@ static void gpio_mpsse_poll(struct work_struct *my_work)
 		usleep_range(MPSSE_POLL_INTERVAL, MPSSE_POLL_INTERVAL + 1000);
 
 		/* Cleanup will trigger at the end of the loop */
-		/* We can't just lock here, otherwise we'll deadlock with
-		   the worker teardown */
+		/* We can't just lock here, otherwise we'll deadlock with worker teardown */
 		scoped_cond_guard(mutex_try, continue, &priv->irq_mutex) {
 			pin_mask = 0;
 			pin_states = 0;
@@ -492,7 +491,7 @@ static void gpio_mpsse_irq_disable(struct irq_data *irqd)
 	gpiochip_disable_irq(&priv->gpio, irqd->hwirq);
 
 	rcu_read_lock();
-	list_for_each_entry_rcu (worker, &priv->workers, list) {
+	list_for_each_entry_rcu(worker, &priv->workers, list) {
 		/* Can't actually do teardown in IRQ context (blocks...) */
 		atomic_set(&worker->cancelled, 1);
 	}
@@ -509,8 +508,6 @@ static void gpio_mpsse_irq_enable(struct irq_data *irqd)
 	if (!atomic_fetch_or(BIT(irqd->hwirq), &priv->irq_enabled)) {
 		worker = devm_kmalloc(&priv->udev->dev, sizeof(*worker), GFP_KERNEL);
 		if (!worker) {
-			dev_err(&priv->udev->dev,
-				"mpsse: Out of memory, can't set up IRQ\n");
 			return;
 		}
 		worker->priv = priv;
@@ -701,7 +698,7 @@ static void gpio_mpsse_disconnect(struct usb_interface *intf)
 		rcu_read_unlock();
 		/* Make sure list consumers are finished before we tear down */
 		synchronize_rcu();
-		list_for_each_entry (worker, &destructors, destroy)
+		list_for_each_entry(worker, &destructors, destroy)
 			gpio_mpsse_stop(worker);
 	}
 
