@@ -506,9 +506,8 @@ static void gpio_mpsse_irq_enable(struct irq_data *irqd)
 	/* If no-one else was using the IRQ, enable it */
 	if (!atomic_fetch_or(BIT(irqd->hwirq), &priv->irq_enabled)) {
 		worker = devm_kmalloc(&priv->udev->dev, sizeof(*worker), GFP_KERNEL);
-		if (!worker) {
+		if (!worker)
 			return;
-		}
 		worker->priv = priv;
 		INIT_LIST_HEAD(&worker->list);
 		INIT_WORK(&worker->work, gpio_mpsse_poll);
@@ -686,7 +685,7 @@ static void gpio_mpsse_disconnect(struct usb_interface *intf)
 
 	scoped_guard(mutex, &priv->irq_mutex) {
 		rcu_read_lock();
-		list_for_each_entry_rcu (worker, &priv->workers, list) {
+		list_for_each_entry_rcu(worker, &priv->workers, list) {
 			list_del_rcu(&worker->list);
 			/* Give worker a chance to terminate itself */
 			atomic_set(&worker->cancelled, 1);
