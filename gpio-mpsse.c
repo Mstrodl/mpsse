@@ -42,8 +42,8 @@ struct mpsse_worker {
 	struct work_struct  work;
 	atomic_t       cancelled;
 	struct list_head    list;   /* linked list */
+	struct rcu_head      rcu;   /* synchronization */
 	struct list_head destroy;   /* teardown linked list */
-	struct rcu_head     rcu;    /* synchronization */
 };
 
 struct bulk_desc {
@@ -76,7 +76,7 @@ static struct mpsse_quirk bryx_brik_quirk = {
 static const struct usb_device_id gpio_mpsse_table[] = {
 	{ USB_DEVICE(0x0c52, 0xa064) },   /* SeaLevel Systems, Inc. */
 	{ USB_DEVICE(0x0403, 0x6988),     /* FTDI, assigned to Bryx */
-	  .driver_info = (kernel_ulong_t)&bryx_brik_quirk},
+	  .driver_info = (kernel_ulong_t)&bryx_brik_quirk },
 	{ }                               /* Terminating entry */
 };
 
@@ -224,9 +224,8 @@ static void gpio_mpsse_set_multiple(struct gpio_chip *chip, unsigned long *mask,
 	unsigned long i, bank, bank_mask, bank_bits;
 	struct mpsse_priv *priv = gpiochip_get_data(chip);
 
-	if (mpsse_ensure_supported(chip, mask, GPIO_LINE_DIRECTION_OUT)) {
+	if (mpsse_ensure_supported(chip, mask, GPIO_LINE_DIRECTION_OUT))
 		return;
-	}
 
 	guard(mutex)(&priv->io_mutex);
 	for_each_set_clump8(i, bank_mask, mask, chip->ngpio) {
